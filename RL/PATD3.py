@@ -6,6 +6,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 import numpy as np
 import copy
+import env
 
 
 class ModernBlock(nn.Module):
@@ -64,7 +65,7 @@ class Actor(nn.Module):
         self.w_sec = nn.Linear(hidden_dim, 4)  # Sec 子因子
 
         # 最小权重限制 (5%)，防止某项权重归零
-        self.min_w = 0.05
+        self.min_w = 0.1
 
         # [关键优化] 初始化 Bias 使得初始输出接近均匀分布
         self._init_bias_to_balanced()
@@ -137,8 +138,8 @@ class PATD3Agent:
         self.policy_noise = 0.1
         self.noise_clip = 0.3
         self.policy_freq = 2
-        self.trust_coef = 1.0  # 信任预测辅助任务的权重
-        self.dirichlet_alpha = 0.5  # 狄利克雷分布参数 (越小越极端，越大越平均)
+        self.trust_coef = 0.5  # 信任预测辅助任务的权重
+        self.dirichlet_alpha = 0.6  # 狄利克雷分布参数 (越小越极端，越大越平均)
 
         # Networks
         self.encoder = SharedEncoder(state_dim).to(device)
@@ -179,7 +180,7 @@ class PATD3Agent:
             # 线性插值混合
             w_new = (1 - noise_lvl) * w + noise_lvl * dir_noise
             # 再次保底限制 (5%)
-            w_new = np.maximum(0.05, w_new)
+            w_new = np.maximum(0.1, w_new)
             return w_new / w_new.sum()
 
         # 2. 高斯探索 (针对节点选择)
@@ -295,6 +296,10 @@ class PrioritizedBuffer:
         ind = np.random.randint(0, len(self.storage), size=batch_size)
         batch = [self.storage[i] for i in ind]
         return map(np.stack, zip(*batch))
+
+    def reset(self):
+        self.__init__()
+
 
 
 if __name__ == "__main__":

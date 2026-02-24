@@ -1,5 +1,5 @@
 import plyvel
-from block import Block
+import Blockchain.block as block
 
 class Blockchain:
     """ 账本管理器：管理磁盘持久化、创世块、高度索引及防伪统计 """
@@ -12,12 +12,12 @@ class Blockchain:
         """ 检查本地数据库，若为空则强制初始化创世区块 """
         last_h = self.db.get(b'l')
         if not last_h:
-            gen = Block(0, [], "0"*64, "GENESIS", b"0"*32, b"0"*64, b"0"*64)
+            gen = block.Block(0, [], "0"*64, "GENESIS", b"0"*32, b"0"*64, b"0"*64)
             gen.h = "0" * 64
             self.save_block(gen)
         else:
             self.tip = last_h.decode()
-            self.height = Block.unpack(self.db.get(last_h)).idx
+            self.height = block.Block.unpack(self.db.get(last_h)).idx
 
     def save_block(self, block):
         """ 将区块写入磁盘并更新高度和最新哈希索引 """
