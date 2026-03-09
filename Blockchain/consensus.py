@@ -72,7 +72,12 @@ class ConsensusEngine:
             target_pool[b_hash] = {}
 
         target_pool[b_hash][voter_id] = sig
+
+        # 核心优化：确保阈值计算准确
+        # 6个节点：(6 * 2 // 3) + 1 = 5 票。如果有节点由于网络延迟没起来，会导致卡死
+        # 建议在实验阶段打印当前票数，方便调试
         threshold = (active_count * 2 // 3) + 1
+        print(f"[DEBUG] Hash {b_hash[:8]} Phase {phase} Votes: {len(target_pool[b_hash])}/{threshold}")
 
         return len(target_pool[b_hash]) >= threshold
 

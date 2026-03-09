@@ -12,7 +12,7 @@ from util.parameter import BASE_PORT, NODE_COUNT,ENABLE_SHARDING
 
 TX_INLET_PORT = 3350  # Node 0 的交易入口
 TEST_DURATION = 10  # 测试时长 (秒)
-THREAD_COUNT = 15  # 注入线程数 (建议根据 CPU 核心数调整)
+THREAD_COUNT = 10  # 注入线程数 (建议根据 CPU 核心数调整)
 TX_PER_THREAD_SLEEP = 0.01  # 每个线程两次发送间的间隔 (0.01s 约等于单线程 100TPS)
 
 Mode = main.Mode

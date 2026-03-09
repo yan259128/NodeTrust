@@ -1,5 +1,6 @@
 from Node.node import Node
 from cryptography.hazmat.primitives.asymmetric import ed25519
+from util.parameter import ENABLE_SHARDING,SHARD_COUNT
 
 
 class BlockchainNode(Node):
@@ -8,8 +9,15 @@ class BlockchainNode(Node):
     def __init__(self, node_id, port, location_code):
         super().__init__(node_id, port)
         self.location = location_code
+
         # 地理分片逻辑：根据位置前两位划分为片 S_i
-        self.shard_id = f"Shard_{str(location_code)[:2]}"
+        if ENABLE_SHARDING:
+            # self.shard_id = f"Shard_{str(location_code)[:2]}"
+            # 确保分片 ID 是根据分片总数计算的
+            shard_index = location_code % SHARD_COUNT
+            self.shard_id = f"Shard_{shard_index}"
+        else:
+            self.shard_id = "GLOBAL_SHARD"
 
         # 加密身份
         self.private_key = ed25519.Ed25519PrivateKey.generate()

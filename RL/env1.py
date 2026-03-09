@@ -1,4 +1,4 @@
-# env.py
+# env.py 用于保存上一版本的env
 import util.parameter as parameter
 from Reliability import calc_trust as Reliability
 import numpy as np
@@ -87,119 +87,86 @@ class EdgeEnv:
         next_state = []
         all_nodes_list = list(self.nodes.values())
 
-        # 1. 模拟环境恶化 (发生在评估之前)
+        # 1. 环境动态恶化
         self._simulate_environment_drift()
 
-        # 2. [关键] 计算两种信任值 (用于 Reward 对比)
-        # 2.1 使用 Agent 权重计算 T_adaptive (这是真实生效的)
-        # print("权重更新")
+        # 2. Agent 调整权重
+        # 你的观点是对的：在 low_sec 下，Agent 可能会学出提高 perf/rel 权重以维持分数
         self.evaluator.update_all_weights(
             weights_pack['dim'], weights_pack['perf'],
             weights_pack['rel'], weights_pack['sec']
         )
-        # print("权重： ", weights_pack)
-        # 执行动作带来的状态改变 (如惩罚)
+
+        # 3. 执行选节点动作
         selected_nodes = []
+        selected_trust_values = []  # 记录被选节点的信任值
+
         for nid, act in actions.items():
-            node = self.nodes[nid]
-            node.trust_rl = trust_pred[nid]
+            node_obj = self.nodes[nid]
+            # 计算当前权重下的信任值
+            neighbors = [n for n in all_nodes_list if n.Id != nid]
+            current_trust = self.evaluator.calculate_only(node_obj, neighbors, nonce)
+            node_obj.trust_current = current_trust  # 更新节点状态
+
             if act == 1:
-                node.is_select = True
-                selected_nodes.append(node)
-                if not node.is_identification or node.attack_rate > 8:
-                    reporters = [n for n in all_nodes_list if n.Id != nid and n.is_select]
-                    level = 'L4' if not node.is_identification else 'L2'
-                    self.evaluator.punish_node(node, level, reporters, nonce)
+                node_obj.is_select = True
+                selected_nodes.append(node_obj)
+                selected_trust_values.append(current_trust)
             else:
-                node.is_select = False
-        # print("Nonce: {}".format(nonce))
+                node_obj.is_select = False
 
-        # 正式更新节点状态 (T_adaptive)
-        for node in all_nodes_list:
-            neighbors = [n for n in all_nodes_list if n.Id != node.Id]
-            # 这会更新 node.trust_total
-            self.evaluator.evaluate_node(node, neighbors, nonce)
-            # 记录下适应性权重算出的值
-            node.temp_adaptive_trust = node.trust_total
-            # print("{}.temp_adaptive_trust: {}".format(node.Id, node.trust_total))
+        # 4. 状态更新
+        for node_obj in all_nodes_list:
+            next_state.extend(self._get_node_feature(node_obj))
 
-        # 2.2 使用默认权重计算 T_baseline (仅计算不更新)
-        self.evaluator.reset_defaults()
-        # print("权重重置")
-        for node in all_nodes_list:
-            neighbors = [n for n in all_nodes_list if n.Id != node.Id]
-            base_val = self.evaluator.calculate_only(node, neighbors, nonce)
-            node.trust_baseline = base_val
-            # print("Nonce {}, {}.trust_baseline: {}, temp_adaptive_trust: {}".format(nonce, node.Id, node.trust_baseline, node.trust_total))
+        # 5. 计算奖励 (核心修改)
+        reward = self.calc_reward_survival(selected_nodes, weights_pack)
 
-        # 3. 构建 Next State (包含最新的 adaptive trust)
-        for node in all_nodes_list:
-            next_state.extend(self._get_node_feature(node))
+        # 6. 计算共识信任 (用于日志显示)
+        consensus_trust = np.mean(selected_trust_values) if len(selected_trust_values) > 0 else 0.0
 
-        # 4. 计算奖励 (传入 actions 以便知道选了谁)
-        reward = self.calc_reward_contrast(actions)
+        # 7. 结束条件
+        done = (nonce >= 200)
 
-        done = (nonce >= 200)  # 演示用200轮
         info = {
-            "trust_totals": {k: v.trust_total for k, v in self.nodes.items()},
-            "weights": weights_pack
+            "trust_totals": {k: v.trust_current for k, v in self.nodes.items()},
+            "consensus_trust": consensus_trust
         }
         return np.array(next_state), reward, done, info
 
-    def calc_reward_contrast(self, actions):
-        """
-        奖励函数
-        """
-        selected_nodes = [self.nodes[nid] for nid, act in actions.items() if act == 1]
+    def calc_reward_survival(self, selected_nodes, weights_pack):
+        # 1. 系统存活惩罚 (System Survival)
+        if len(selected_nodes) < self.min_selected:
 
-        # 1. 硬约束
-        if len(selected_nodes) < self.min_selected: return -20.0
-        for node in selected_nodes:
-            if not node.is_identification: return -50.0
+            return -100.0
 
-        total_reward = 0
+        total_reward = 0.0
+        # 2. 基础奖励：系统正常运转
+        total_reward += 10.0
 
-        # 记录本轮的平均适应性信任值，用于计算趋势
-        current_avg_adaptive = 0
+        # 3. 质量评估 (Quality Assessment)
+        avg_attack = 0
+        avg_perf = 0
 
         for node in selected_nodes:
-            # 增量 = 自适应权重分 - 死板基准分
-            diff = node.temp_adaptive_trust - node.trust_baseline
+            # --- 安全性维度 (Negative) ---
+            if node.attack_rate > 5 or node.leakage > 5:
+                # 扣分力度减小，允许少量“坏节点”混入，只要系统不崩
+                total_reward -= (node.attack_rate * 2.0)
 
-            # 判断节点是否本身是“好人” (Ground Truth)
-            is_good_node = (node.R_sec < 10 and node.service_quality > 4.0)
+            total_reward += (node.Throughput / 100.0) * 2.0
+            total_reward += (node.trust_current * 10.0)  # 奖励最终信任值高
 
-            if is_good_node:
-                current_avg_adaptive += node.temp_adaptive_trust
+        # 4. 场景特化逻辑 (Scenario Logic)
+        if self.scenario_mode == 'low_sec':
+            # 只有当选中了节点，且其中包含了好节点时，给额外奖励
+            safe_nodes = [n for n in selected_nodes if n.attack_rate < 5]
+            total_reward += len(safe_nodes) * 5.0
 
-                if diff > 0:
-                    # [优化点1] 指数级奖励
-                    # 即使 diff 只有 0.1，exp(0.1*5) = 1.64，放大倍数显著
-                    # 如果 diff 达到 0.3，exp(0.3*5) = 4.48
-                    # 这会让 Agent 极度渴望拉大 gap
-                    scale = 5.0
-                    reward_boost = (np.exp(diff * scale) - 1.0) * 50.0
-                    total_reward += reward_boost
-                else:
-                    # 策略无效，轻微惩罚
-                    total_reward += diff * 200.0
-            else:
-                # 坏节点，严厉打击洗白行为
-                if diff > 0:
-                    total_reward -= diff * 500.0  # 极重罚
-                else:
-                    total_reward += abs(diff) * 10.0
+        elif self.scenario_mode == 'low_perf':
+            # 低性能模式
+            avg_resp = np.mean([n.Response_Time for n in selected_nodes])
+            total_reward -= avg_resp * 0.1
 
-        # 如果本轮的信任值 比 上一轮 还有提升，额外奖励
-        # 这鼓励 Agent 不断微调权重，而不是满足于现状
-        if hasattr(self, 'last_avg_trust'):
-            avg = current_avg_adaptive / max(1, len(selected_nodes))
-            delta = avg - self.last_avg_trust
-            if delta > 0:
-                total_reward += delta * 50.0  # 奖励进步
-
-        # 更新历史记录
-        self.last_avg_trust = current_avg_adaptive / max(1, len(selected_nodes))
-
-        # 归一化防止梯度爆炸
-        return np.clip(total_reward, -1000, 1000)
+        # 5. 归一化，防止梯度爆炸
+        return np.clip(total_reward, -100, 100)

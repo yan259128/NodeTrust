@@ -22,14 +22,34 @@ class EdgeEnv:
         self.scenario_mode = mode
 
     def _get_node_feature(self, node):
+        # 定义归一化辅助函数
+        def norm(val, min_v, max_v):
+            return (np.clip(val, min_v, max_v) - min_v) / (max_v - min_v + 1e-6)
+
         features = [
-            node.Response_Time, node.Request_Success_Rate, node.Throughput,
-            node.bandwidth, node.handle,
-            node.task_completion_rate, node.survival_rate, node.verify_transaction_nums,
-            node.service_quality,
+            # Performance
+            norm(node.Response_Time, 1, 500),
+            norm(node.Request_Success_Rate, 80, 100),
+            norm(node.Throughput, 200, 800),
+            norm(node.bandwidth, 1, 1000),
+            norm(node.handle, 1, 100),
+
+            # Reliability
+            norm(node.task_completion_rate, 80, 100),
+            norm(node.survival_rate, 80, 100),
+            norm(node.verify_transaction_nums, 0, 10000),
+            norm(node.service_quality, 0, 10),
+
+            # Security
             1.0 if node.is_identification else 0.0,
-            node.leakage, node.attack_rate, node.user_get_data_rate,
-            node.trust_current, node.trust_total, node.R_sec
+            norm(node.leakage, 0, 100),
+            norm(node.attack_rate, 0, 10),
+            norm(node.user_get_data_rate, 80, 100),
+
+            # Trust & Stats
+            node.trust_current,  # 已经是 0-1
+            node.trust_total,  # 已经是 0-1
+            norm(node.R_sec, 0, 100)
         ]
         return features
 
@@ -135,38 +155,44 @@ class EdgeEnv:
         return np.array(next_state), reward, done, info
 
     def calc_reward_survival(self, selected_nodes, weights_pack):
-        # 1. 系统存活惩罚 (System Survival)
-        if len(selected_nodes) < self.min_selected:
+        num_selected = len(selected_nodes)
 
-            return -100.0
+        # 1. 系统存活奖励/惩罚 (平滑化)
+        # 之前的 -100 惩罚太硬，导致 Agent 放弃学习。改为梯度惩罚。
+        if num_selected < self.min_selected:
+            # 缺一个节点扣 10 分，比直接扣 100 要好引导 Agent
+            survival_reward = -10.0 * (self.min_selected - num_selected)
+        else:
+            survival_reward = 10.0
 
-        total_reward = 0.0
-        # 2. 基础奖励：系统正常运转
-        total_reward += 10.0
+        if num_selected == 0:
+            return -50.0  # 至少选一个，否则重罚
 
-        # 3. 质量评估 (Quality Assessment)
-        avg_attack = 0
-        avg_perf = 0
+        # 2. 节点质量奖励 (均值化，防止节点数量越多总分越高的偏移)
+        # 使用归一化后的指标计算
+        avg_trust = np.mean([n.trust_current for n in selected_nodes])
 
-        for node in selected_nodes:
-            # --- 安全性维度 (Negative) ---
-            if node.attack_rate > 5 or node.leakage > 5:
-                # 扣分力度减小，允许少量“坏节点”混入，只要系统不崩
-                total_reward -= (node.attack_rate * 2.0)
+        # 安全性惩罚：如果选中的节点 attack_rate 高，重扣分
+        # 对应你给的范围 0-10，如果 attack_rate 是 5，则扣 5*2=10分
+        avg_attack = np.mean([n.attack_rate for n in selected_nodes])
+        security_penalty = avg_attack * 2.0
 
-            total_reward += (node.Throughput / 100.0) * 2.0
-            total_reward += (node.trust_current * 10.0)  # 奖励最终信任值高
+        # 性能奖励：Throughput 200-800，归一化后是 0-1
+        avg_thru = np.mean([(n.Throughput - 200) / 600.0 for n in selected_nodes])
+        perf_reward = avg_thru * 5.0
 
-        # 4. 场景特化逻辑 (Scenario Logic)
-        if self.scenario_mode == 'low_sec':
-            # 只有当选中了节点，且其中包含了好节点时，给额外奖励
-            safe_nodes = [n for n in selected_nodes if n.attack_rate < 5]
-            total_reward += len(safe_nodes) * 5.0
+        total_reward = survival_reward + (avg_trust * 20.0) + perf_reward - security_penalty
 
-        elif self.scenario_mode == 'low_perf':
-            # 低性能模式
+        # 3. 场景补偿 (防止环境切换时 Reward 掉到地心)
+        if self.scenario_mode == 'low_perf':
+            # Response_Time 范围 1-500。如果平均 400ms，扣 (400/100) = 4 分
             avg_resp = np.mean([n.Response_Time for n in selected_nodes])
-            total_reward -= avg_resp * 0.1
+            total_reward -= (avg_resp / 100.0)
 
-        # 5. 归一化，防止梯度爆炸
-        return np.clip(total_reward, -100, 100)
+        elif self.scenario_mode == 'low_sec':
+            # 在安全模式下，如果 Agent 能选出 attack_rate 低于 2 的节点，给额外奖励
+            safe_nodes_count = sum(1 for n in selected_nodes if n.attack_rate < 2)
+            total_reward += safe_nodes_count * 2.0
+
+        # 将单步 reward 限制在 [-20, 20] 左右，有利于 TD3 平稳收敛
+        return np.clip(total_reward, -50, 50)

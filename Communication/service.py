@@ -52,15 +52,53 @@ class TraceabilityService:
             }
         self.client.add_peer(data['ip'], data['port'])
 
-    async def _handle_transaction(self, payload):
+    async def handle_client_transaction(self, payload):
+        """
+        当节点作为网关接收交易时（来自 PULL 端口）
+        逻辑：如果是新交易 -> 无论是否属于本片，都广播出去；如果是本片的，则入库。
+        """
         try:
             tx = TraceTransaction.unpack(payload)
         except:
             return
-        if tx.shard_id == self.shard_id:
-            if self.tx_pool.add_tx(tx):
-                print(f"[BENCHMARK] TX_ENTRY|{tx.h}|{time.time()}")
-                await self.server.broadcast("TX", payload)
+
+        # 1. 只有没见过的交易才处理，防止重复注入
+        if self.tx_pool.is_new(tx.h):
+            # 2. 属于本分片 -> 入库
+            if tx.shard_id == self.shard_id:
+                if self.tx_pool.add_tx(tx):
+                    print(f"[BENCHMARK] TX_ENTRY|{tx.h}|{tx.ts}|{time.time()}")
+
+            # 3. 作为网关，必须广播给全网。
+            # 这样其他属于对应分片的节点才能通过 SUB 收到。
+            await self.server.broadcast("TX", payload)
+
+    async def _handle_transaction(self, payload):
+        """
+        当节点从网络 SUB 收到广播时
+        逻辑：只管属于自己分片的交易。
+        """
+        try:
+            tx = TraceTransaction.unpack(payload)
+        except:
+            return
+
+        # 1. 只有没见过的交易才处理
+        if self.tx_pool.is_new(tx.h):
+            # 2. 关键点：只处理属于本分片的交易
+            if tx.shard_id == self.shard_id:
+                if self.tx_pool.add_tx(tx):
+                    print(f"[BENCHMARK] TX_ENTRY|{tx.h}|{tx.ts}|{time.time()}")
+
+    # async def _handle_transaction(self, payload):
+    #     try:
+    #         tx = TraceTransaction.unpack(payload)
+    #     except:
+    #         return
+    #     if tx.shard_id == self.shard_id:
+    #         if self.tx_pool.add_tx(tx):
+    #             print(f"[BENCHMARK] TX_ENTRY|{tx.h}|{time.time()}")
+    #             await self.server.broadcast("TX", payload)
 
     async def _handle_proposal(self, payload):
         block = Block.unpack(payload)
@@ -181,16 +219,23 @@ class TraceabilityService:
 
     async def run_consensus_logic(self):
         """ 主共识循环 """
+        # 增加初始等待，确保所有节点 Heartbeat 已交换
+        await asyncio.sleep(5)
         while True:
-            await asyncio.sleep(2.5)
-            # 基础检查：是否同步中，池中是否有交易
+            # 缩短检查间隔，提高响应速度
+            await asyncio.sleep(1.0)
+
+            # 基础检查：池中是否有交易
             if len(self.tx_pool.pool) < 1 or self.syncing: continue
+
+            # 节点发现检查：如果一个对等节点都没发现，先不提议
+            if not self.active_shard_peers: continue
 
             # 高度同步检查
             max_peer_height = max([p["height"] for p in self.active_shard_peers.values()], default=0)
             if self.chain.height < max_peer_height: continue
 
-            tx_batch = [t.pack_signed() for t in self.tx_pool.get_batch(50)]
+            tx_batch = [t.pack_signed() for t in self.tx_pool.get_batch(100)]
             pub_bytes = self.node.public_key.public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
 
             if self.mode == "PBFT":

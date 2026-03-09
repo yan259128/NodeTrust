@@ -11,6 +11,7 @@ from Blockchain.node import BlockchainNode
 from Communication.server import ZMQServer
 from Communication.client import ZMQClient
 from Communication.service import TraceabilityService
+from util.parameter import BASE_PORT,NODE_COUNT,ENABLE_SHARDING
 
 Mode = "TW_BFT"
 # Mode = "PoW"
@@ -39,7 +40,7 @@ async def tx_receiver(port, service):
     while True:
         payload = await sock.recv()
         # 直接调用 service 的交易处理逻辑（内含广播）
-        await service._handle_transaction(payload)
+        await service.handle_client_transaction(payload)
 
 
 async def run_node(node_id, port, location_code):
@@ -49,6 +50,8 @@ async def run_node(node_id, port, location_code):
     node.tx_pool = TransactionPool()
     node.consensus_engine = ConsensusEngine(node, mode=Mode)
 
+    print(f"[*] Shard ID: {node.shard_id} (Sharding: {'ON' if ENABLE_SHARDING else 'OFF'})")
+
     # 2. 通讯初始化
     server = ZMQServer(port)
     client = ZMQClient()
@@ -57,8 +60,8 @@ async def run_node(node_id, port, location_code):
     sys.stdout = Logger(node_id)
 
     # 3. 主动发现邻居 (Bootstrap)
-    # 假设测试环境端口为 3300-3303
-    for p in range(3300, 3304):
+
+    for p in range(BASE_PORT, BASE_PORT+NODE_COUNT):
         if p != port:
             client.add_peer("127.0.0.1", p)
 

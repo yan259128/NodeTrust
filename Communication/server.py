@@ -1,5 +1,8 @@
 import zmq
 import zmq.asyncio
+import asyncio
+import random
+from util.parameter import NODE_COUNT
 
 
 class ZMQServer:
@@ -14,6 +17,8 @@ class ZMQServer:
 
     async def broadcast(self, topic, payload):
         """ 向全网发布消息 """
+        low = 0.001 * NODE_COUNT
+        await asyncio.sleep(random.uniform(low, 0.2))
         await self.pub.send_multipart([topic.encode(), payload])
 
     async def start_rep_handler(self, callback):
